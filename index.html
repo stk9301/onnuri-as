@@ -438,37 +438,24 @@ async function apiGet(sheet){
   }catch(e){console.error('apiGet error',e);return[];}
 }
 
-// JSONP 방식으로 쓰기 (CORS 완전 우회)
-function apiWrite(sheet,rows){
-  return new Promise((resolve)=>{
-    const cbName='cb_'+Date.now()+'_'+Math.random().toString(36).slice(2);
-    const payload=encodeURIComponent(JSON.stringify({sheet,rows}));
-    const script=document.createElement('script');
-    let done=false;
-    window[cbName]=(res)=>{
-      if(done)return;done=true;
-      delete window[cbName];
-      try{document.body.removeChild(script);}catch(e){}
-      resolve(true);
-    };
-    script.onerror=()=>{
-      if(done)return;done=true;
-      delete window[cbName];
-      try{document.body.removeChild(script);}catch(e){}
-      resolve(false);
-    };
-    script.src=`${API_URL}?callback=${cbName}&action=write&data=${payload}`;
-    document.body.appendChild(script);
-    setTimeout(()=>{
-      if(done)return;done=true;
-      delete window[cbName];
-      try{document.body.removeChild(script);}catch(e){}
-      resolve(true);
-    },6000);
-  });
+// POST with text/plain (simple request = no preflight = CORS 우회)
+async function apiWrite(sheet,rows){
+  try{
+    const body=JSON.stringify({action:'write',sheet,rows});
+    const res=await fetch(API_URL,{
+      method:'POST',
+      // text/plain은 preflight 없이 전송됨 → CORS 문제 없음
+      headers:{'Content-Type':'text/plain;charset=UTF-8'},
+      body
+    });
+    // Apps Script는 항상 200 반환하므로 성공으로 처리
+    return true;
+  }catch(e){
+    console.error('apiWrite error',e);
+    return false;
+  }
 }
 
-// 하위 호환용 (기존 코드에서 apiPost 호출하는 곳 대응)
 async function apiPost(data){
   return apiWrite(data.sheet,data.rows);
 }
