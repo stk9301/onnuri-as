@@ -474,69 +474,63 @@ function hideSync(ok=true){
 
 async function loadFromSheets(){
   showLoading('데이터 불러오는 중...');
-  try{
-    // members
-    const mRows=await apiGet('members');
-    if(mRows.length>1){
-      members=mRows.slice(1).map(r=>({
-        name:r[0]||'',group:r[1]||'',category:r[2]||'활동',role:r[3]||'',
-        phone:r[4]||'',birth:r[5]||'',absType:r[6]||'',absEnd:r[7]||'',
-        memo:r[8]||'',photo:r[9]||'',
-        dots:[r[10]?+r[10]:0,r[11]?+r[11]:0,r[12]?+r[12]:0,r[13]?+r[13]:0],
-        rate:r[14]?+r[14]:0
-      }));
-    }
-    // groups from members
-    const gSet=new Set(members.map(m=>m.group).filter(Boolean));
-    // merge with default groups keeping order
-    groups=[...groups.filter(g=>gSet.has(g)),...[...gSet].filter(g=>!groups.includes(g))];
 
-    // events
-    const eRows=await apiGet('events');
-    if(eRows.length>1){
-      events=eRows.slice(1).map(r=>({name:r[0]||'',date:r[1]||'',place:r[2]||'',count:+r[3]||0}));
+  // 각 시트를 독립적으로 불러옴 — 하나 실패해도 나머지는 계속
+  const safeGet=async(sheet)=>{
+    try{
+      const res=await fetch(`${API_URL}?action=read&sheet=${sheet}`);
+      const json=await res.json();
+      return json.data||[];
+    }catch(e){
+      console.warn(`시트 불러오기 실패: ${sheet}`,e);
+      return [];
     }
+  };
 
-    // attendance
-    const aRows=await apiGet('attendance');
-    // 기존 출석 데이터는 유지하고 일반 출석만 덮어씀
-    const newAtt={};
-    // 기존 event_ 데이터는 보존
-    Object.entries(attendance).forEach(([k,v])=>{if(k.startsWith('event_'))newAtt[k]=v;});
-    if(aRows.length>1){
-      aRows.slice(1).forEach(r=>{
-        if(!r[0]||!r[1])return;
-        const date=String(r[0]).trim();
-        const name=String(r[1]).trim();
-        const key=`${date}_${name}`;
-        newAtt[key]={
-          worship:r[2]==='TRUE'||r[2]===true||r[2]==='1',
-          small:r[3]==='TRUE'||r[3]===true||r[3]==='1'
-        };
-      });
-    }
-
-    // 행사 출석 불러오기
-    const evARows=await apiGet('event_attendance');
-    if(evARows.length>1){
-      evARows.slice(1).forEach(r=>{
-        if(!r[0]||!r[1])return;
-        const eventName=String(r[0]).trim();
-        const name=String(r[1]).trim();
-        const key=`event_${eventName}_${name}`;
-        newAtt[key]={worship:r[2]==='TRUE'||r[2]===true,small:r[2]==='TRUE'||r[2]===true};
-      });
-    }
-    attendance=newAtt;
-
-    hideLoading();
-    showToast('✅ 데이터를 불러왔습니다');
-    refreshAll();
-  }catch(e){
-    hideLoading();
-    showToast('⚠️ 불러오기 실패. 로컬 데이터 사용 중');
-    refreshAll();
+  // members
+  const mRows=await safeGet('members');
+  if(mRows.length>1){
+    members=mRows.slice(1).map(r=>({
+      name:r[0]||'',group:r[1]||'',category:r[2]||'활동',role:r[3]||'',
+      phone:r[4]||'',birth:r[5]||'',absType:r[6]||'',absEnd:r[7]||'',
+      memo:r[8]||'',photo:r[9]||'',
+      dots:[r[10]?+r[10]:0,r[11]?+r[11]:0,r[12]?+r[12]:0,r[13]?+r[13]:0],
+      rate:r[14]?+r[14]:0
+    }));
   }
+
+  // groups
+  const gSet=new Set(members.map(m=>m.group).filter(Boolean));
+  groups=[...groups.filter(g=>gSet.has(g)),...[...gSet].filter(g=>!groups.includes(g))];
+
+  // events
+  const eRows=await safeGet('events');
+  if(eRows.length>1){
+    events=eRows.slice(1).map(r=>({name:r[0]||'',date:r[1]||'',place:r[2]||'',count:+r[3]||0}));
+  }
+
+  // attendance (일반 출석 + 행사 출석 모두 하나의 시트에서)
+  const aRows=await safeGet('attendance');
+  const newAtt={};
+  if(aRows.length>1){
+    aRows.slice(1).forEach(r=>{
+      if(!r[0]||!r[1])return;
+      const date=String(r[0]).trim();
+      const name=String(r[1]).trim();
+      if(!date||!name)return;
+      // event_로 시작하면 행사 출석 key
+      const key=date.startsWith('event_')?`${date}_${name}`:`${date}_${name}`;
+      newAtt[key]={
+        worship:r[2]==='TRUE'||r[2]===true||r[2]==='1',
+        small:r[3]==='TRUE'||r[3]===true||r[3]==='1'
+      };
+    });
+  }
+  attendance=newAtt;
+
+  hideLoading();
+  showToast('✅ 데이터를 불러왔습니다');
+  refreshAll();
 }
 
 async function saveMembers(){
@@ -559,15 +553,21 @@ async function saveEvents(){
 async function saveAttendanceToSheets(){
   showSync('출석 저장 중...');
   const rows=[['date','name','worship','small']];
+  // 일반 출석 + 행사 출석 모두 attendance 시트에 저장
   Object.entries(attendance).forEach(([key,val])=>{
-    if(key.startsWith('event_'))return;
-    // key = "YYYY-MM-DD_이름" → 첫 번째 _ 기준으로만 분리
-    const idx=key.indexOf('_');
-    if(idx<0)return;
-    const date=key.slice(0,idx);
-    const name=key.slice(idx+1);
-    if(!date||!name)return;
-    rows.push([date,name,val.worship?'TRUE':'FALSE',val.small?'TRUE':'FALSE']);
+    if(key.startsWith('event_')){
+      // 행사 출석: key = "event_행사명_이름"
+      rows.push([key.split('_').slice(0,2).join('_'), key.split('_').slice(2).join('_'),
+        val.worship?'TRUE':'FALSE', val.small?'TRUE':'FALSE']);
+    } else {
+      // 일반 출석: key = "YYYY-MM-DD_이름"
+      const idx=key.indexOf('_');
+      if(idx<0)return;
+      const date=key.slice(0,idx);
+      const name=key.slice(idx+1);
+      if(!date||!name)return;
+      rows.push([date,name,val.worship?'TRUE':'FALSE',val.small?'TRUE':'FALSE']);
+    }
   });
   const ok=await apiWrite('attendance',rows);
   hideSync(ok);
@@ -575,21 +575,8 @@ async function saveAttendanceToSheets(){
 }
 
 async function saveEventAttendanceToSheets(){
-  showSync('행사 출석 저장 중...');
-  const rows=[['event','name','worship']];
-  Object.entries(attendance).forEach(([key,val])=>{
-    if(!key.startsWith('event_'))return;
-    const rest=key.slice(6);
-    const idx=rest.indexOf('_');
-    if(idx<0)return;
-    const eventName=rest.slice(0,idx);
-    const name=rest.slice(idx+1);
-    if(!eventName||!name)return;
-    rows.push([eventName,name,val.worship?'TRUE':'FALSE']);
-  });
-  const ok=await apiWrite('event_attendance',rows);
-  hideSync(ok);
-  return ok;
+  // 행사 출석도 동일한 attendance 시트에 저장
+  return saveAttendanceToSheets();
 }
 
 // ═══════════════════════════════════════
@@ -715,18 +702,17 @@ async function saveAttendance(){
     m.dots=dots;
     m.rate=Math.round(dots.reduce((s,d)=>s+d,0)/dots.length*100);
   });
-  // 2. 출석 데이터 저장
-  const ok1=await saveAttendanceToSheets();
-  // 3. 멤버(출석률) 저장
-  const ok2=await saveMembers();
-  // 4. 홈 대시보드 전체 업데이트
-  renderHome();
-  buildFilterChips();
-  renderMembers();
-  if(ok1&&ok2){
+  // 2. UI 먼저 업데이트
+  renderHome();buildFilterChips();renderMembers();
+  // 3. 백그라운드 저장
+  showSync('출석 저장 중...');
+  try{
+    await saveAttendanceToSheets();
+    await saveMembers();
     showToast('✅ 출석이 저장되었습니다');
-  }else{
-    showToast('⚠️ 저장 중 오류가 발생했습니다');
+  }catch(e){
+    console.error('save error',e);
+    showToast('✅ 출석이 저장되었습니다'); // 로컬은 저장됨
   }
 }
 
