@@ -515,11 +515,25 @@ async function loadFromSheets(){
   if(aRows.length>1){
     aRows.slice(1).forEach(r=>{
       if(!r[0]||!r[1])return;
-      const date=String(r[0]).trim();
+      let dateStr=String(r[0]).trim();
       const name=String(r[1]).trim();
-      if(!date||!name)return;
-      // event_로 시작하면 행사 출석 key
-      const key=date.startsWith('event_')?`${date}_${name}`:`${date}_${name}`;
+      if(!dateStr||!name)return;
+
+      // d: 접두사 제거 (텍스트 강제저장 방식)
+      if(dateStr.startsWith('d:')){
+        dateStr=dateStr.slice(2);
+      }
+      // ISO 형식 (2026-05-09T14:00:00.000Z) → YYYY-MM-DD 변환
+      else if(dateStr.includes('T')){
+        dateStr=dateStr.slice(0,10);
+      }
+      // Date 객체로 파싱된 경우 처리
+      else if(r[0] instanceof Date){
+        const d=r[0];
+        dateStr=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+      }
+
+      const key=`${dateStr}_${name}`;
       newAtt[key]={
         worship:r[2]==='TRUE'||r[2]===true||r[2]==='1',
         small:r[3]==='TRUE'||r[3]===true||r[3]==='1'
@@ -553,20 +567,21 @@ async function saveEvents(){
 async function saveAttendanceToSheets(){
   showSync('출석 저장 중...');
   const rows=[['date','name','worship','small']];
-  // 일반 출석 + 행사 출석 모두 attendance 시트에 저장
   Object.entries(attendance).forEach(([key,val])=>{
     if(key.startsWith('event_')){
-      // 행사 출석: key = "event_행사명_이름"
-      rows.push([key.split('_').slice(0,2).join('_'), key.split('_').slice(2).join('_'),
-        val.worship?'TRUE':'FALSE', val.small?'TRUE':'FALSE']);
+      const parts=key.split('_');
+      // event_행사명_이름 → parts[0]=event, parts[1]=행사명, parts[2+]=이름
+      const eventKey=parts.slice(0,2).join('_');
+      const name=parts.slice(2).join('_');
+      rows.push([eventKey,name,val.worship?'TRUE':'FALSE',val.small?'TRUE':'FALSE']);
     } else {
-      // 일반 출석: key = "YYYY-MM-DD_이름"
       const idx=key.indexOf('_');
       if(idx<0)return;
       const date=key.slice(0,idx);
       const name=key.slice(idx+1);
       if(!date||!name)return;
-      rows.push([date,name,val.worship?'TRUE':'FALSE',val.small?'TRUE':'FALSE']);
+      // 날짜 앞에 공백 추가해서 Sheets가 Date로 변환하는 것 방지
+      rows.push(['d:'+date,name,val.worship?'TRUE':'FALSE',val.small?'TRUE':'FALSE']);
     }
   });
   const ok=await apiWrite('attendance',rows);
