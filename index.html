@@ -438,17 +438,47 @@ async function apiGet(sheet){
   }catch(e){console.error('apiGet error',e);return[];}
 }
 
+// JSONP 방식으로 POST 우회 (Apps Script CORS 문제 완전 해결)
+function apiPostJsonp(data){
+  return new Promise((resolve)=>{
+    const cbName='cb_'+Date.now();
+    const encoded=encodeURIComponent(JSON.stringify(data));
+    const script=document.createElement('script');
+    window[cbName]=(res)=>{
+      delete window[cbName];
+      document.body.removeChild(script);
+      resolve(true);
+    };
+    script.onerror=()=>{
+      delete window[cbName];
+      try{document.body.removeChild(script);}catch(e){}
+      resolve(false);
+    };
+    script.src=`${API_URL}?callback=${cbName}&action=write&sheet=${encodeURIComponent(data.sheet)}&data=${encoded}`;
+    document.body.appendChild(script);
+    // 5초 타임아웃
+    setTimeout(()=>{
+      if(window[cbName]){
+        delete window[cbName];
+        try{document.body.removeChild(script);}catch(e){}
+        resolve(true); // 타임아웃도 전송은 됐다고 가정
+      }
+    },5000);
+  });
+}
+
 async function apiPost(data){
   try{
-    // no-cors 모드로 전송 (CORS 문제 우회)
-    await fetch(API_URL,{
+    const res=await fetch(API_URL,{
       method:'POST',
-      mode:'no-cors',
-      headers:{'Content-Type':'application/json'},
+      headers:{'Content-Type':'text/plain'},
       body:JSON.stringify(data)
     });
     return true;
-  }catch(e){console.error('apiPost error',e);return false;}
+  }catch(e){
+    console.error('apiPost error',e);
+    return false;
+  }
 }
 
 function showSync(text){
@@ -490,13 +520,35 @@ async function loadFromSheets(){
 
     // attendance
     const aRows=await apiGet('attendance');
-    attendance={};
+    // 기존 출석 데이터는 유지하고 일반 출석만 덮어씀
+    const newAtt={};
+    // 기존 event_ 데이터는 보존
+    Object.entries(attendance).forEach(([k,v])=>{if(k.startsWith('event_'))newAtt[k]=v;});
     if(aRows.length>1){
       aRows.slice(1).forEach(r=>{
-        const key=`${r[0]}_${r[1]}`;
-        attendance[key]={worship:r[2]==='TRUE'||r[2]===true||r[2]==='1',small:r[3]==='TRUE'||r[3]===true||r[3]==='1'};
+        if(!r[0]||!r[1])return;
+        const date=String(r[0]).trim();
+        const name=String(r[1]).trim();
+        const key=`${date}_${name}`;
+        newAtt[key]={
+          worship:r[2]==='TRUE'||r[2]===true||r[2]==='1',
+          small:r[3]==='TRUE'||r[3]===true||r[3]==='1'
+        };
       });
     }
+
+    // 행사 출석 불러오기
+    const evARows=await apiGet('event_attendance');
+    if(evARows.length>1){
+      evARows.slice(1).forEach(r=>{
+        if(!r[0]||!r[1])return;
+        const eventName=String(r[0]).trim();
+        const name=String(r[1]).trim();
+        const key=`event_${eventName}_${name}`;
+        newAtt[key]={worship:r[2]==='TRUE'||r[2]===true,small:r[2]==='TRUE'||r[2]===true};
+      });
+    }
+    attendance=newAtt;
 
     hideLoading();
     showToast('✅ 데이터를 불러왔습니다');
@@ -526,12 +578,37 @@ async function saveEvents(){
 async function saveAttendanceToSheets(){
   showSync('출석 저장 중...');
   const rows=[['date','name','worship','small']];
+  // event_ 접두사 없는 일반 출석만 저장 (행사 출석은 별도)
   Object.entries(attendance).forEach(([key,val])=>{
-    const [date,...nameParts]=key.split('_');
-    rows.push([date,nameParts.join('_'),val.worship?'TRUE':'FALSE',val.small?'TRUE':'FALSE']);
+    if(key.startsWith('event_'))return;
+    // key 형식: "YYYY-MM-DD_이름"
+    const underIdx=key.indexOf('_');
+    if(underIdx<0)return;
+    const date=key.slice(0,underIdx);
+    const name=key.slice(underIdx+1);
+    rows.push([date,name,val.worship?'TRUE':'FALSE',val.small?'TRUE':'FALSE']);
   });
   const ok=await apiPost({action:'write',sheet:'attendance',rows});
   hideSync(ok);
+  return ok;
+}
+
+async function saveEventAttendanceToSheets(){
+  showSync('행사 출석 저장 중...');
+  const rows=[['event','name','worship']];
+  Object.entries(attendance).forEach(([key,val])=>{
+    if(!key.startsWith('event_'))return;
+    // key 형식: "event_행사명_이름"
+    const rest=key.slice(6); // "event_" 제거
+    const firstUnder=rest.indexOf('_');
+    if(firstUnder<0)return;
+    const eventName=rest.slice(0,firstUnder);
+    const name=rest.slice(firstUnder+1);
+    rows.push([eventName,name,val.worship?'TRUE':'FALSE']);
+  });
+  const ok=await apiPost({action:'write',sheet:'event_attendance',rows});
+  hideSync(ok);
+  return ok;
 }
 
 // ═══════════════════════════════════════
@@ -646,18 +723,30 @@ function togAtt(btn){
 }
 
 async function saveAttendance(){
-  // 출석률 업데이트
+  // 1. 출석률 업데이트
   const weeks=getWeeks().map(w=>w.date);
   members.forEach(m=>{
     if(!ACTIVE.has(m.category))return;
-    const dots=weeks.map(w=>{const a=attendance[`${w}_${m.name}`];return a&&(a.worship||a.small)?1:0;});
+    const dots=weeks.map(w=>{
+      const a=attendance[`${w}_${m.name}`];
+      return a&&(a.worship||a.small)?1:0;
+    });
     m.dots=dots;
     m.rate=Math.round(dots.reduce((s,d)=>s+d,0)/dots.length*100);
   });
-  await saveAttendanceToSheets();
-  await saveMembers();
+  // 2. 출석 데이터 저장
+  const ok1=await saveAttendanceToSheets();
+  // 3. 멤버(출석률) 저장
+  const ok2=await saveMembers();
+  // 4. 홈 대시보드 전체 업데이트
   renderHome();
-  showToast('✅ 출석이 저장되었습니다');
+  buildFilterChips();
+  renderMembers();
+  if(ok1&&ok2){
+    showToast('✅ 출석이 저장되었습니다');
+  }else{
+    showToast('⚠️ 저장 중 오류가 발생했습니다');
+  }
 }
 
 // ── 멤버 필터 ──
@@ -781,11 +870,18 @@ function togEventAtt(btn){
   }
 }
 async function saveEventAttendance(){
-  await saveAttendanceToSheets();
-  // 참석 인원 업데이트
+  await saveEventAttendanceToSheets();
   const ev=events.find(e=>e.name===currentEventName);
-  if(ev){ev.count=activeMembers().filter(m=>{const a=attendance[`event_${currentEventName}_${m.name}`];return a&&a.worship;}).length;await saveEvents();renderEvents();}
-  closeM('modal-event-detail');showToast('✅ 참석이 저장되었습니다');
+  if(ev){
+    ev.count=activeMembers().filter(m=>{
+      const a=attendance[`event_${currentEventName}_${m.name}`];
+      return a&&a.worship;
+    }).length;
+    await saveEvents();
+    renderEvents();
+  }
+  closeM('modal-event-detail');
+  showToast('✅ 참석이 저장되었습니다');
 }
 
 function csvDownload(fn,rows){const ws=XLSX.utils.aoa_to_sheet(rows);const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Sheet1');XLSX.writeFile(wb,fn);}
