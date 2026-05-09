@@ -438,47 +438,39 @@ async function apiGet(sheet){
   }catch(e){console.error('apiGet error',e);return[];}
 }
 
-// JSONP 방식으로 POST 우회 (Apps Script CORS 문제 완전 해결)
-function apiPostJsonp(data){
+// JSONP 방식으로 쓰기 (CORS 완전 우회)
+function apiWrite(sheet,rows){
   return new Promise((resolve)=>{
-    const cbName='cb_'+Date.now();
-    const encoded=encodeURIComponent(JSON.stringify(data));
+    const cbName='cb_'+Date.now()+'_'+Math.random().toString(36).slice(2);
+    const payload=encodeURIComponent(JSON.stringify({sheet,rows}));
     const script=document.createElement('script');
+    let done=false;
     window[cbName]=(res)=>{
+      if(done)return;done=true;
       delete window[cbName];
-      document.body.removeChild(script);
+      try{document.body.removeChild(script);}catch(e){}
       resolve(true);
     };
     script.onerror=()=>{
+      if(done)return;done=true;
       delete window[cbName];
       try{document.body.removeChild(script);}catch(e){}
       resolve(false);
     };
-    script.src=`${API_URL}?callback=${cbName}&action=write&sheet=${encodeURIComponent(data.sheet)}&data=${encoded}`;
+    script.src=`${API_URL}?callback=${cbName}&action=write&data=${payload}`;
     document.body.appendChild(script);
-    // 5초 타임아웃
     setTimeout(()=>{
-      if(window[cbName]){
-        delete window[cbName];
-        try{document.body.removeChild(script);}catch(e){}
-        resolve(true); // 타임아웃도 전송은 됐다고 가정
-      }
-    },5000);
+      if(done)return;done=true;
+      delete window[cbName];
+      try{document.body.removeChild(script);}catch(e){}
+      resolve(true);
+    },6000);
   });
 }
 
+// 하위 호환용 (기존 코드에서 apiPost 호출하는 곳 대응)
 async function apiPost(data){
-  try{
-    const res=await fetch(API_URL,{
-      method:'POST',
-      headers:{'Content-Type':'text/plain'},
-      body:JSON.stringify(data)
-    });
-    return true;
-  }catch(e){
-    console.error('apiPost error',e);
-    return false;
-  }
+  return apiWrite(data.sheet,data.rows);
 }
 
 function showSync(text){
@@ -564,31 +556,33 @@ async function saveMembers(){
   showSync('멤버 저장 중...');
   const header=['name','group','category','role','phone','birth','absType','absEnd','memo','photo','w1','w2','w3','w4','rate'];
   const rows=[header,...members.map(m=>[m.name,m.group,m.category,m.role,m.phone,m.birth,m.absType,m.absEnd,m.memo,m.photo,...(m.dots||[0,0,0,0]),m.rate||0])];
-  const ok=await apiPost({action:'write',sheet:'members',rows});
+  const ok=await apiWrite('members',rows);
   hideSync(ok);
+  return ok;
 }
 
 async function saveEvents(){
   showSync('행사 저장 중...');
   const rows=[['name','date','place','count'],...events.map(e=>[e.name,e.date,e.place,e.count])];
-  const ok=await apiPost({action:'write',sheet:'events',rows});
+  const ok=await apiWrite('events',rows);
   hideSync(ok);
+  return ok;
 }
 
 async function saveAttendanceToSheets(){
   showSync('출석 저장 중...');
   const rows=[['date','name','worship','small']];
-  // event_ 접두사 없는 일반 출석만 저장 (행사 출석은 별도)
   Object.entries(attendance).forEach(([key,val])=>{
     if(key.startsWith('event_'))return;
-    // key 형식: "YYYY-MM-DD_이름"
-    const underIdx=key.indexOf('_');
-    if(underIdx<0)return;
-    const date=key.slice(0,underIdx);
-    const name=key.slice(underIdx+1);
+    // key = "YYYY-MM-DD_이름" → 첫 번째 _ 기준으로만 분리
+    const idx=key.indexOf('_');
+    if(idx<0)return;
+    const date=key.slice(0,idx);
+    const name=key.slice(idx+1);
+    if(!date||!name)return;
     rows.push([date,name,val.worship?'TRUE':'FALSE',val.small?'TRUE':'FALSE']);
   });
-  const ok=await apiPost({action:'write',sheet:'attendance',rows});
+  const ok=await apiWrite('attendance',rows);
   hideSync(ok);
   return ok;
 }
@@ -598,15 +592,15 @@ async function saveEventAttendanceToSheets(){
   const rows=[['event','name','worship']];
   Object.entries(attendance).forEach(([key,val])=>{
     if(!key.startsWith('event_'))return;
-    // key 형식: "event_행사명_이름"
-    const rest=key.slice(6); // "event_" 제거
-    const firstUnder=rest.indexOf('_');
-    if(firstUnder<0)return;
-    const eventName=rest.slice(0,firstUnder);
-    const name=rest.slice(firstUnder+1);
+    const rest=key.slice(6);
+    const idx=rest.indexOf('_');
+    if(idx<0)return;
+    const eventName=rest.slice(0,idx);
+    const name=rest.slice(idx+1);
+    if(!eventName||!name)return;
     rows.push([eventName,name,val.worship?'TRUE':'FALSE']);
   });
-  const ok=await apiPost({action:'write',sheet:'event_attendance',rows});
+  const ok=await apiWrite('event_attendance',rows);
   hideSync(ok);
   return ok;
 }
