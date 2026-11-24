@@ -8,8 +8,9 @@
 <meta name="theme-color" content="#ffffff">
 <meta name="apple-mobile-web-app-title" content="온누리 AS 교적">
 <title>온누리 AS 교적</title>
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link rel="preconnect" href="https://script.google.com">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.19.0/dist/tabler-icons.min.css">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
 /* ── 구글시트 API URL ── */
 /* 아래 URL을 본인 것으로 교체하세요 */
@@ -464,6 +465,7 @@ async function apiWrite(sheet,rows){
       body
     });
     // Apps Script는 항상 200 반환하므로 성공으로 처리
+    saveCache();
     return true;
   }catch(e){
     console.error('apiWrite error',e);
@@ -487,8 +489,8 @@ function hideSync(ok=true){
   bar.classList.add('hidden');
 }
 
-async function loadFromSheets(){
-  showLoading('데이터 불러오는 중...');
+async function loadFromSheets(silent){
+  if(!silent)showLoading('데이터 불러오는 중...');
 
   // 각 시트를 독립적으로 불러옴 — 하나 실패해도 나머지는 계속
   const safeGet=async(sheet)=>{
@@ -502,8 +504,10 @@ async function loadFromSheets(){
     }
   };
 
+  // 3개 시트를 동시에 요청
+  const [mRows,eRows,aRows]=await Promise.all([safeGet('members'),safeGet('events'),safeGet('attendance')]);
+
   // members
-  const mRows=await safeGet('members');
   if(mRows.length>1){
     members=mRows.slice(1).map(r=>({
       name:r[0]||'',group:r[1]||'',category:r[2]||'활동',role:r[3]||'',
@@ -519,13 +523,11 @@ async function loadFromSheets(){
   groups=[...groups.filter(g=>gSet.has(g)),...[...gSet].filter(g=>!groups.includes(g))];
 
   // events
-  const eRows=await safeGet('events');
   if(eRows.length>1){
     events=eRows.slice(1).map(r=>({name:r[0]||'',date:r[1]||'',place:r[2]||'',count:+r[3]||0}));
   }
 
   // attendance (일반 출석 + 행사 출석 모두 하나의 시트에서)
-  const aRows=await safeGet('attendance');
   const newAtt={};
   if(aRows.length>1){
     aRows.slice(1).forEach(r=>{
@@ -558,8 +560,27 @@ async function loadFromSheets(){
   attendance=newAtt;
 
   hideLoading();
-  showToast('✅ 데이터를 불러왔습니다');
+  if(!silent)showToast('✅ 데이터를 불러왔습니다');
+  saveCache();
   refreshAll();
+}
+
+// ── 로컬 캐시: 앱을 열면 저장된 데이터를 즉시 보여주고, 뒤에서 최신 데이터로 갱신 ──
+const CACHE_KEY='onnuri_cache_v2';
+function saveCache(){
+  try{
+    const lite=members.map(m=>({...m,photo:''}));
+    localStorage.setItem(CACHE_KEY,JSON.stringify({members:lite,events,attendance,groups}));
+  }catch(e){}
+}
+function loadCache(){
+  try{
+    const c=JSON.parse(localStorage.getItem(CACHE_KEY)||'null');
+    if(!c||!c.members||!c.members.length)return false;
+    members=c.members;events=c.events||[];attendance=c.attendance||{};
+    if(c.groups&&c.groups.length)groups=c.groups;
+    return true;
+  }catch(e){return false;}
 }
 
 async function saveMembers(){
@@ -881,7 +902,8 @@ async function saveEventAttendance(){
   showToast('✅ 참석이 저장되었습니다');
 }
 
-function csvDownload(fn,rows){const ws=XLSX.utils.aoa_to_sheet(rows);const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Sheet1');XLSX.writeFile(wb,fn);}
+function loadXLSX(){return new Promise((res,rej)=>{if(window.XLSX)return res();const sc=document.createElement('script');sc.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';sc.onload=res;sc.onerror=rej;document.head.appendChild(sc);});}
+async function csvDownload(fn,rows){try{await loadXLSX();}catch(e){showToast('⚠️ 엑셀 모듈을 불러오지 못했습니다');return;}const ws=XLSX.utils.aoa_to_sheet(rows);const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Sheet1');XLSX.writeFile(wb,fn);}
 function exportMembers(){const rows=[['이름','순','타이틀','분류','연락처','생년월일','부재상태','메모']];members.forEach(m=>rows.push([m.name,m.group,m.role==='S'?'순장':m.role==='M'?'MC':m.role==='T'?'팀장':'일반',m.category,m.phone,m.birth,m.absType||'',m.memo]));csvDownload('멤버리스트.xlsx',rows);}
 function exportEvents(){const rows=[['행사명','날짜','장소','참석인원']];events.forEach(ev=>rows.push([ev.name,ev.date,ev.place,ev.count]));csvDownload('행사목록.xlsx',rows);}
 function exportEventAttendance(){const base=activeMembers();const list=eventGrpFilter==='전체'?base:base.filter(m=>m.group===eventGrpFilter);const rows=[['이름','순','타이틀','참석여부']];list.forEach(m=>{const a=attendance[`event_${currentEventName}_${m.name}`];rows.push([m.name,m.group,m.role==='S'?'순장':m.role==='M'?'MC':m.role==='T'?'팀장':'',a?'참석':'미정']);});csvDownload(`${currentEventName}_참석명단.xlsx`,rows);}
@@ -932,7 +954,9 @@ document.querySelectorAll('.modal-bg').forEach(m=>{m.addEventListener('click',e=
   renderWeekTabs();
   const weeks=getWeeks();
   currentAttWeek=weeks[0].date;
-  await loadFromSheets();
+  const cached=loadCache();
+  if(cached){hideLoading();populateGroupSelects();refreshAll();}
+  await loadFromSheets(cached);
 })();
 </script>
 </body>
